@@ -26,7 +26,7 @@ Visulization during training:
 
 open http://localhost:8097/env/fcn in a browser 
 
-![visdom](./visulization.png)
+<img src="./visulization.png" style="width: 500px;"/>
 
 
 
