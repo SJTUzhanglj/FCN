@@ -32,7 +32,7 @@ win2 = vis.image(torch.zeros(3, 100, 100))
 win3 = vis.image(torch.zeros(3, 100, 100))
 color_transform = Colorize()
 """parameters"""
-iterNum = 3000
+iterNum = 30
 
 """data loader"""
 # dataRoot = '/media/xyz/Files/data/datasets'
