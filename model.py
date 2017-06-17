@@ -1,9 +1,8 @@
 import numpy as np
 import torch
 import torch.nn as nn
-import pdb
 
-# https://github.com/shelhamer/fcn.berkeleyvision.org/blob/master/surgery.py
+
 def get_upsample_filter(size):
     """Make a 2D bilinear kernel suitable for upsampling"""
     factor = (size + 1) // 2
@@ -17,12 +16,11 @@ def get_upsample_filter(size):
     return torch.from_numpy(filter).float()
 
 
-class FCN32s(nn.Module):
+class FCN8s(nn.Module):
 
-    def __init__(self, n_class=21, nodeconv=False):
-        super(FCN32s, self).__init__()
-        self.nodeconv = nodeconv
-        self.features = nn.Sequential(
+    def __init__(self, n_class=21):
+        super(FCN8s, self).__init__()
+        self.features_123 = nn.Sequential(
             # conv1
             nn.Conv2d(3, 64, 3, padding=100),
             nn.ReLU(inplace=True),
@@ -45,7 +43,8 @@ class FCN32s(nn.Module):
             nn.Conv2d(256, 256, 3, padding=1),
             nn.ReLU(inplace=True),
             nn.MaxPool2d(2, stride=2, ceil_mode=True),  # 1/8
-
+        )
+        self.features_4 = nn.Sequential(
             # conv4
             nn.Conv2d(256, 512, 3, padding=1),
             nn.ReLU(inplace=True),
@@ -54,8 +53,9 @@ class FCN32s(nn.Module):
             nn.Conv2d(512, 512, 3, padding=1),
             nn.ReLU(inplace=True),
             nn.MaxPool2d(2, stride=2, ceil_mode=True),  # 1/16
-
-            # conv5
+        )
+        self.features_5 = nn.Sequential(
+            # conv5 features
             nn.Conv2d(512, 512, 3, padding=1),
             nn.ReLU(inplace=True),
             nn.Conv2d(512, 512, 3, padding=1),
@@ -78,41 +78,45 @@ class FCN32s(nn.Module):
             # score_fr
             nn.Conv2d(4096, n_class, 1),
         )
-        if self.nodeconv:
-            self.upscore = nn.UpsamplingBilinear2d(scale_factor=32)
-            self.upscore.scale_factor = None  # XXX: shoud be set in forward
-        else:
-            self.upscore = nn.ConvTranspose2d(n_class, n_class, 64, stride=32,
+        self.score_feat3 = nn.Conv2d(256, n_class, 1)
+        self.score_feat4 = nn.Conv2d(512, n_class, 1)
+        self.upscore = nn.ConvTranspose2d(n_class, n_class, 16, stride=8,
+                                              bias=False)
+        self.upscore_4 = nn.ConvTranspose2d(n_class, n_class, 4, stride=2,
+                                              bias=False)
+        self.upscore_5 = nn.ConvTranspose2d(n_class, n_class, 4, stride=2,
                                               bias=False)
 
     def forward(self, x):
-        h = self.features(x)
+        feat3 = self.features_123(x)  #1/8
+        feat4 = self.features_4(feat3)  #1/16
+        feat5 = self.features_5(feat4)  #1/32
 
-        h = self.classifier(h)
+        score5 = self.classifier(feat5)
+        upscore5 = self.upscore_5(score5)
+        score4 = self.score_feat4(feat4)
+        score4 = score4[:, :, 5:5+upscore5.size()[2], 5:5+upscore5.size()[3]].contiguous()
+        score4 += upscore5
 
-        if self.nodeconv:
-            from chainer.utils import conv
-            in_h, in_w = h.size()[2:4]
-            out_h = conv.get_deconv_outsize(in_h, k=64, s=32, p=0)
-            out_w = conv.get_deconv_outsize(in_w, k=64, s=32, p=0)
-            self.upscore.size = out_h, out_w
-            h = self.upscore(h)
-        else:
-            h = self.upscore(h)
-        h = h[:, :, 19:19+x.size()[2], 19:19+x.size()[3]].contiguous()
+        score3 = self.score_feat3(feat3)
+        upscore4 = self.upscore_4(score4)
+        score3 = score3[:, :, 9:9+upscore4.size()[2], 9:9+upscore4.size()[3]].contiguous()
+        score3 += upscore4
+        h = self.upscore(score3)
+        h = h[:, :, 28:28+x.size()[2], 28:28+x.size()[3]].contiguous()
 
         return h
 
     def copy_params_from_vgg16(self, vgg16, copy_fc8=True, init_upscore=True):
-        for l1, l2 in zip(vgg16.features, self.features):
+        for l1, l2 in zip(vgg16.features, [self.features_123,self.features_4,self.features_5]):
             if (isinstance(l1, nn.Conv2d) and
                     isinstance(l2, nn.Conv2d)):
                 assert l1.weight.size() == l2.weight.size()
                 assert l1.bias.size() == l2.bias.size()
                 l2.weight.data = l1.weight.data
                 l2.bias.data = l1.bias.data
+
         for i1, i2 in zip([0, 3], [0, 3]):
-        #for i1, i2 in zip([1, 4], [0, 3]):
             l1 = vgg16.classifier[i1]
             l2 = self.classifier[i2]
             l2.weight.data = l1.weight.data.view(l2.weight.data.size())
@@ -130,4 +134,18 @@ class FCN32s(nn.Module):
             assert h == w
             weight = get_upsample_filter(h)
             self.upscore.weight.data = \
+                weight.view(1, 1, h, w).repeat(c1, c2, 1, 1)
+            
+            c1, c2, h, w = self.upscore_4.weight.data.size()
+            assert c1 == c2 == n_class
+            assert h == w
+            weight = get_upsample_filter(h)
+            self.upscore_4.weight.data = \
+                weight.view(1, 1, h, w).repeat(c1, c2, 1, 1)
+                
+            c1, c2, h, w = self.upscore_5.weight.data.size()
+            assert c1 == c2 == n_class
+            assert h == w
+            weight = get_upsample_filter(h)
+            self.upscore_5.weight.data = \
                 weight.view(1, 1, h, w).repeat(c1, c2, 1, 1)
